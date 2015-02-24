@@ -7,38 +7,43 @@ var blessed = require('blessed');
 var bodyParser = require('body-parser');
 var app = express();
 var my_ip = "128.223.4.35";
+var Discover = require('node-discover');
 
 var numNodesInsecureChannel = 0;
 var numNodesOnSecureChannel = 0;
 //fake mac addresses and public keys which can be replaced later 
 var validNodes = [];
-var validMacAddresses = [ "abc", "def", "ghi","jkl"];
+var validMacAddresses = ["abc", "def", "ghi", "jkl"];
 
+var myPublicKey = "publicCA.pub";
+var myPrivateKey = "privateCA.pem";
 
-var validPublicKeys = [ "node1.pub", "node2.pub","node3.pub", "node3.pub"];
+var validPublicKeys = ["pubN1.pub", "pubN2.pub", "pubN3.pub", "pubCS.pub"];
+var fs = require('fs');
+var ursa = require('ursa');
+
 
 var dictNodes = {
-     "abc": "31",
-	 "def": "53",
-	 "ghi": "283",
-	 "jkl": "307"
+    "abc": "pubN1.pub", //101
+    "def": "pubN2.pub", //103
+    "ghi": "pubN3.pub" //104
 }
 
 var sharedKeyWithCS = "123456789";
 
 var ifaces = os.networkInterfaces();
 Object.keys(ifaces).forEach(function(ifname) {
-	var alias = 0;
-	ifaces[ifname].forEach(function(iface) {
-	if ('IPv4' !== iface.family || iface.internal !== false) {
-		return;
-	}
-	if (alias >= 1) {
-		my_ip = iface.address;
-	} else {
-		my_ip = iface.address;
-	}
- });
+    var alias = 0;
+    ifaces[ifname].forEach(function(iface) {
+        if ('IPv4' !== iface.family || iface.internal !== false) {
+            return;
+        }
+        if (alias >= 1) {
+            my_ip = iface.address;
+        } else {
+            my_ip = iface.address;
+        }
+    });
 });
 
 app.use(bodyParser.urlencoded());
@@ -47,42 +52,39 @@ app.use(bodyParser.urlencoded());
 var screen = blessed.screen();
 
 var list = blessed.list({
-	parent: screen,
-	width: '50%',
-	height: '100%',
-	top: 0,
-	left: 0,
-	align: 'center',
-	fg: 'blue',
-	border: {
-	type: 'line'
-	},
-	//selectedBg: 'white',
-	selectedBold: true,
-	mouse: true,
-	keys: true,
-	vi: true
-});
+        parent: screen,
+        width: '100%',
+        height: '100%',
+        top: 0,
+        left: 0,
+        align: 'center',
+        fg: 'blue',
+        border: {
+            type: 'line'
+        },
+        //selectedBg: 'white',
+        selectedBold: true,
+        mouse: true,
+        keys: true,
+        vi: true
+    });
 
 
 list.prepend(new blessed.Text({
-left: 2,
-content: ' This node is ' + my_ip
-}));
+            left: 2,
+            content: ' This node is ' + my_ip
+        }));
 
 
 
 var logCount = 0;
 
 function myLogs(log) {
-	list.add("" + log);
-	list.focus();
-	list.select(logCount++);
-	screen.render();
+    list.add("" + log);
+    list.focus();
+    list.select(logCount++);
+    screen.render();
 }
-
-
-
 
 app.set('port', process.env.PORT || 4000);
 
@@ -92,114 +94,98 @@ var querystring = require('querystring');
 
 screen.render();
 
+function PostObject(post_data, sendto) {
+    // An object of options to indicate where to post to   
+    // console.log('problem with request: ' + pendingQueue);
+    var post_options = {
+        host: sendto,
+        port: '4000',
+        path: '/do_post',
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(post_data)
+        }
+    };
+
+    // Set up the request
+    var post_req = http.request(post_options, function(res) {
+        res.setEncoding('utf8');
+        res.on('data', function(chunk) {
+
+        });
+    });
+
+    post_req.on('error', function(e, post_data) {
+        console.log("Error connecting");
+    });
+
+    post_req.write(post_data);
+    post_req.end();
+}
 
 
-var discoverWorker = new Discover({
-	helloInterval: 1000,
-	checkInterval: 2000,
-	nodeTimeout: 2000,
-	masterTimeout: 2000
+// handle POST requests
+app.post('/do_post', function(req, res) {
+    //console.log("Received Message");
+    var the_body = req.body;
+
+    receiveMessageWorker(the_body);
+
+    res.json({
+            "body": the_body,
+            "id": JSON.stringify(my_ip)
+        });
+
 });
 
-var discoverCriticalSection = new Discover({
-	helloInterval: 1000,
-	checkInterval: 2000,
-	nodeTimeout: 2000,
-	masterTimeout: 2000,
-	key: sharedKeyWithCS
-});
 
-//register callback functions for worker nodes
-registerCallbacks();
+function receiveMessageWorker(data) {
 
-//register callback functions for secure channel to critical section
-registerCallbacksCS();
+    var key = ursa.createPrivateKey(fs.readFileSync('privateCA.pem'));
+    var msgReceived = key.decrypt(data.message.toString('base64'), 'base64', 'utf8');
+    
+
+    var macAddress = msgReceived.substring(0, 3);
+    var ipAddress = msgReceived.substring(4);
+	myLogs("decrypted " + macAddress);
+	myLogs("decrypted ipAddress " + ipAddress);
+    var isValid = false;
+    for (var i = 0; i < validMacAddresses.length; i++) {
+        if (validMacAddresses[i].localeCompare(macAddress) == 0) {
+            isValid = true;
+        }
+    }
 
 
-function receiveMessageCriticalSection(data){
 
-   
+    if (isValid) {
+    	myLogs("sending key .." );
+        var cert = ursa.createPublicKey(fs.readFileSync(dictNodes[macAddress]));
+        var encryptKey = cert.encrypt(sharedKeyWithCS, 'utf8', 'base64');
+
+        var post_data = querystring.stringify({
+                 key: encryptKey
+            });
+       PostObject(post_data,ipAddress);
+
+    }
+
 }
 
-function receiveMessageWorker(data){
-   
-   //got request to join the secure channel 
-  var encryptedMAC = data.macEncrypted;
-  var encryptedIP = data.ipEncrypted;
 
-  
-  
-   
-   
-}
-
-function registerCallbacks() {
-	discoverWorker.on("promotion", function() {
-
-		var success = d.join(my_ip, receiveMessageWorker);
-		if (!success) {
-		//myLogs("could not join that channel; probably because it is reserved");
-		}
-	});
-
-	discoverWorker.on("demotion", function() {
-	});
-	discoverWorker.on("added", function(obj) {
-		numNodesInsecureChannel++;
-		myLogs("Other nodes " + numNodesInsecureChannel);
-	});
-	
-	discoverWorker.on("removed", function(obj) {
-		numNodesInsecureChannel--;
-		myLogs("Other nodes " + numNodesInsecureChannel);
-	});
-
-	discoverWorker.on("master", function(obj) {
-		master_ip = obj.address;
-		var success = d.join(master_ip, receiveMessageWorker);
-		if (!success) {
-         //myLogs("slave could not join that channel; probably because it is reserved");
-		}
-	});
-}
-
-function registerCallbacksCS() {
-	discoverCriticalSection.on("promotion", function() {
-
-		var success = d.join("critical", receiveMessageCriticalSection);
-		if (!success) {
-		//myLogs("could not join that channel; probably because it is reserved");
-		}
-	});
-
-	discoverCriticalSection.on("demotion", function() {
-	});
-	discoverCriticalSection.on("added", function(obj) {
-		
-	});
-	
-	discoverCriticalSection.on("removed", function(obj) {
-		numNodesOnSecureChannel--;
-		myLogs("Other nodes " + numNodesOnSecureChannel);
-	});
-
-	discoverCriticalSection.on("master", function(obj) {
-		master_ip = obj.address;
-		
-	});
-}
 
 
 // Quit on Escape, q, or Control-C.
 screen.key(['escape', 'q', 'C-c'], function(ch, key) {
-	return process.exit(0);
+    return process.exit(0);
 });
 
 screen.render();
 
 http.createServer(app).listen(app.get('port'), function() {
-	myLogs("Express server listening on port " + app.get('port'));
+    myLogs("Express server listening on port " + app.get('port'));
 });
 process.on('uncaughtException', function(err) {
-	console.log('Caught exception: ' + err);
+    console.log('Caught exception: ' + err);
 });
